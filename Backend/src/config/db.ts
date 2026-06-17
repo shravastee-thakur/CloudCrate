@@ -1,13 +1,14 @@
 import mongoose from "mongoose";
 import { env } from "./env.js";
 import logger from "../utils/logger.js";
+import { ApiError } from "../utils/apiError.js";
 
 export const connectDb = async () => {
   try {
     const mongoUrl = env.MONGO_URL;
 
     if (!mongoUrl) {
-      throw new Error("MONGO_URL environment variable is not set");
+      throw new ApiError(401, "MONGO_URL environment variable is not set");
     }
 
     await mongoose.connect(mongoUrl);
