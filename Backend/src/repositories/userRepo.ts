@@ -3,10 +3,9 @@ import { HydratedDocument } from "mongoose";
 
 export type UserDocument = HydratedDocument<IUser, IUserMethods>;
 
-export type CreateUserData = Pick<
-  IUser,
-  "name" | "email" | "password" | "role"
->;
+export type CreateUserData = Pick<IUser, "name" | "email" | "password"> & {
+  role?: IUser["role"];
+};
 
 export const findByEmail = (email: string): Promise<UserDocument | null> => {
   return User.findOne({ email }).select("+password").exec();

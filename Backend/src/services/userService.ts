@@ -11,12 +11,8 @@ import {
   TokenPayload,
   verifyRefreshToken,
 } from "../utils/jwt.js";
+import { LoginInput, RegisterInput } from "../validators/authValidator.js";
 
-export interface RegisterInput extends CreateUserData {}
-export interface LoginInput {
-  email: string;
-  password: string;
-}
 export interface UserDto {
   _id: string;
   name: string;
@@ -64,7 +60,7 @@ export const loginVerifyCredentials = async (
 ): Promise<UserDto> => {
   const user = await userRepo.findByEmail(data.email);
   if (!user) {
-    if (!user) throw new ApiError(401, "Invalid credentials");
+    throw new ApiError(401, "Invalid credentials");
   }
 
   const match = await user.comparePassword(data.password);
@@ -104,6 +100,8 @@ export const verifyUserOtp = async (userId: string, otp: string) => {
       throw new ApiError(500, "Failed to update user verification status");
     user = updatedUser;
   }
+
+  return mapToUserDto(user);
 };
 
 // -----x-----(token rotate)--------

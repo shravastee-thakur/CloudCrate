@@ -13,6 +13,8 @@
   "license": "ISC",
   "description": "",
   "dependencies": {
+    "@arcjet/inspect": "^1.5.0",
+    "@arcjet/node": "^1.5.0",
     "@upstash/redis": "^1.38.0",
     "bcrypt": "^6.0.0",
     "bullmq": "^5.77.6",
