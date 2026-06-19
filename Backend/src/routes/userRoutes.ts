@@ -7,8 +7,10 @@ import { rateLimiterMiddleware } from "../middlewares/rateLimiter.js";
 
 const router = express.Router();
 
-router.post("/users", sanitizeMiddleware, userController.createUser);
+// Register
+router.post("/", sanitizeMiddleware, userController.createUser);
 
+// Login step one
 router.post(
   "/otp-requests",
   securityMiddleware,
@@ -16,6 +18,7 @@ router.post(
   userController.createOtpRequest,
 );
 
+// Verify otp
 router.post(
   "/sessions",
   securityMiddleware,
@@ -24,10 +27,13 @@ router.post(
   userController.createSession,
 );
 
+// Logout
 router.delete("/sessions", authenticate, userController.destroySession);
 
+// Refresh
 router.post("/tokens", userController.createToken);
 
+// Forget password
 router.post(
   "/password-resets",
   sanitizeMiddleware,
@@ -35,6 +41,7 @@ router.post(
   userController.createPasswordReset,
 );
 
+// Reset password
 router.patch(
   "/password-resets",
   sanitizeMiddleware,

@@ -77,7 +77,7 @@ export const hashedOtp = (otp: string): string => {
 // Otp save
 export const processLoginOtp = async (userEmail: string) => {
   const otp = String(crypto.randomInt(100000, 999999));
-  await otpService.saveOtp(userEmail, otp);
+  await otpService.saveOtp(userEmail, hashedOtp(otp));
   return otp;
 };
 

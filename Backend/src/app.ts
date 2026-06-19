@@ -4,7 +4,7 @@ import cookieParser from "cookie-parser";
 import helmet from "helmet";
 import { sanitizeMiddleware } from "./middlewares/sanitize.js";
 import { errorHandler } from "./middlewares/errorMiddleware.js";
-import userRoutes from "./routes/userRoutes.js"
+import userRoutes from "./routes/userRoutes.js";
 
 const app = express();
 
@@ -24,10 +24,9 @@ app.use(
 );
 app.use(sanitizeMiddleware);
 
-
 // Routes
-app.use("/api/v1/users", userRoutes)
-// http://localhost:3000/api/v1/users/register
+app.use("/api/v1/users", userRoutes);
+// http://localhost:3000/api/v1/users/users
 
 app.use(errorHandler);
 
