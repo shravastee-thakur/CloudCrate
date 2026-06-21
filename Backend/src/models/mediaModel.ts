@@ -1,6 +1,7 @@
 import mongoose, { Schema, Model } from "mongoose";
 
 export interface IMedia {
+  _id: mongoose.Types.ObjectId;
   bucketName: string;
   originalName: string;
   storageKey: string;
