@@ -61,12 +61,29 @@ export const findActiveByChecksum = async (
   }).exec();
 };
 
+export const createDuplicateRecord = async (
+  uploadedBy: string,
+  existingFile: MediaDocument,
+): Promise<MediaDocument> => {
+  const duplicateMedia = new Media({
+    uploadedBy,
+    originalName: existingFile.originalName,
+    mimeType: existingFile.mimeType,
+    sizeBytes: existingFile.sizeBytes,
+    sha1Checksum: existingFile.sha1Checksum,
+    bucketName: existingFile.bucketName,
+    storageKey: existingFile.storageKey,
+    status: "completed",
+  });
+  return duplicateMedia.save();
+};
+
 export const attachMultipartId = async (
   mediaId: string,
   multipartUploadId: string,
 ): Promise<MediaDocument | null> => {
-  return Media.findByIdAndUpdate(
-    mediaId,
+  return Media.findOneAndUpdate(
+    { _id: mediaId, status: "pending" },
     {
       multipartUploadId,
       status: "uploading",
@@ -79,8 +96,8 @@ export const finalizeUpload = async (
   mediaId: string,
   session?: ClientSession,
 ): Promise<MediaDocument | null> => {
-  return Media.findByIdAndUpdate(
-    mediaId,
+  return Media.findOneAndUpdate(
+    { _id: mediaId, status: "uploading" },
     {
       status: "completed",
       $unset: { uploadExpiresAt: 1 }, // Completely removes the expiration timer
@@ -101,7 +118,7 @@ export const getPaginatedUserMedia = async (
   const skip = (page - 1) * limit;
 
   const [files, totalCount] = await Promise.all([
-    Media.find(query).sort({ createdAt: -1 }).skip(skip).limit(limit),
+    Media.find(query).sort({ createdAt: -1 }).skip(skip).limit(limit).exec(),
     Media.countDocuments(query).exec(),
   ]);
 
@@ -143,8 +160,8 @@ export const fetchFilesForCloudPurge = async (
 export const confirmCloudPurge = async (
   mediaId: string,
 ): Promise<MediaDocument | null> => {
-  return Media.findByIdAndUpdate(
-    mediaId,
+  return Media.findOneAndUpdate(
+    { _id: mediaId, deletedAt: { $ne: null }, b2DeletedAt: null },
     { b2DeletedAt: new Date() },
     { new: true },
   ).exec();
@@ -166,5 +183,9 @@ export const fetchExpiredMultipartUploads = async (
 export const hardDelete = async (
   mediaId: string,
 ): Promise<MediaDocument | null> => {
-  return Media.findByIdAndDelete(mediaId);
+  return Media.findOneAndDelete({
+    _id: mediaId,
+    status: "pending",
+    uploadExpiresAt: { $lt: new Date() },
+  }).exec();
 };
