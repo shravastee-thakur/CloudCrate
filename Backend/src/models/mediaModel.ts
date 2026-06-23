@@ -32,7 +32,6 @@ const mediaSchema = new Schema<IMedia>(
       // The unique file path in B2/Floci (e.g., 'trailers/12345-movie.mp4')
       type: String,
       required: true,
-      unique: true,
     },
     mimeType: {
       // e.g., 'video/mp4' or 'image/jpeg'
@@ -82,7 +81,7 @@ mediaSchema.index({ uploadedBy: 1, deletedAt: 1 });
 
 mediaSchema.index({ deletedAt: 1, b2DeletedAt: 1 }); // For fetchFilesForCloudPurge
 mediaSchema.index({ uploadExpiresAt: 1 }); // For fetchExpiredMultipartUploads
-mediaSchema.index({ sha1Checksum: 1, status: 1 }); // For findActiveByChecksum
+mediaSchema.index({ sha1Checksum: 1, status: 1, deletedAt: 1 }); // For findActiveByChecksum
 
 const Media: Model<IMedia> = mongoose.model<IMedia>("Media", mediaSchema);
 export default Media;

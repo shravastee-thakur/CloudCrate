@@ -185,7 +185,7 @@ export const hardDelete = async (
 ): Promise<MediaDocument | null> => {
   return Media.findOneAndDelete({
     _id: mediaId,
-    status: "pending",
+    status: { $in: ["pending", "uploading"] },
     uploadExpiresAt: { $lt: new Date() },
   }).exec();
 };

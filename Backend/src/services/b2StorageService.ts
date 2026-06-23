@@ -7,17 +7,16 @@ import {
   CreateMultipartUploadCommand,
   UploadPartCommand,
   CompleteMultipartUploadCommand,
+  HeadObjectCommand,
 } from "@aws-sdk/client-s3";
 import { getSignedUrl } from "@aws-sdk/s3-request-presigner";
 
-// Environment configuration
 const IS_LOCAL = process.env.NODE_ENV === "development";
-const S3_ENDPOINT = process.env.S3_ENDPOINT || "http://localhost:9000"; // Floci default
-const S3_REGION = process.env.S3_REGION || "us-east-005"; // Backblaze default region format
+const S3_ENDPOINT = process.env.S3_ENDPOINT || "http://localhost:9000";
+const S3_REGION = process.env.S3_REGION || "us-east-005";
 const S3_ACCESS_KEY = process.env.S3_ACCESS_KEY || "floci_access";
 const S3_SECRET_KEY = process.env.S3_SECRET_KEY || "floci_secret";
 
-// Singleton S3 Client Factory
 const getS3Client = (): S3Client => {
   return new S3Client({
     region: S3_REGION,
@@ -26,18 +25,12 @@ const getS3Client = (): S3Client => {
       accessKeyId: S3_ACCESS_KEY,
       secretAccessKey: S3_SECRET_KEY,
     },
-    // Floci and many local S3 emulators require path-style URLs.
-    // Backblaze B2 also supports this. It prevents bucket subdomain resolution errors locally.
     forcePathStyle: IS_LOCAL,
   });
 };
 
 const s3Client = getS3Client();
 
-/**
- * Generates a presigned URL for direct single-part uploads from the browser.
- * Includes the SHA1 checksum to ensure Backblaze B2 rejects corrupted files.
- */
 export const generateUploadPresignedUrl = async (
   bucketName: string,
   storageKey: string,
@@ -49,72 +42,95 @@ export const generateUploadPresignedUrl = async (
     Bucket: bucketName,
     Key: storageKey,
     ContentType: mimeType,
-    ChecksumSHA1: sha1Checksum, // B2 validates this on receipt
+    ChecksumSHA1: sha1Checksum,
   });
-
   return getSignedUrl(s3Client, command, { expiresIn });
 };
 
-/**
- * Initiates a multipart upload in B2 and returns presigned URLs for every chunk.
- * The frontend will use these URLs to upload file parts in parallel.
- */
-export const generateMultipartUploadUrls = async (
+export const initiateMultipartUpload = async (
   bucketName: string,
   storageKey: string,
   mimeType: string,
-  partCount: number,
-  expiresIn: number = 86400, // 24 hours to allow large uploads
-): Promise<{ uploadId: string; partUrls: string[] }> => {
-  const createCommand = new CreateMultipartUploadCommand({
+): Promise<string> => {
+  const command = new CreateMultipartUploadCommand({
     Bucket: bucketName,
     Key: storageKey,
     ContentType: mimeType,
   });
+  const response = await s3Client.send(command);
+  return response.UploadId!;
+};
 
-  const multipartInitResponse = await s3Client.send(createCommand);
-  const uploadId = multipartInitResponse.UploadId!;
-
+export const generatePresignedUrlsForChunks = async (
+  bucketName: string,
+  storageKey: string,
+  uploadId: string,
+  partCount: number,
+  expiresIn: number = 86400,
+): Promise<string[]> => {
   const partUrls = await Promise.all(
     Array.from({ length: partCount }, async (_, i) => {
       const partNumber = i + 1;
-
-      const uploadPartCommand = new UploadPartCommand({
+      const command = new UploadPartCommand({
         Bucket: bucketName,
         Key: storageKey,
         UploadId: uploadId,
         PartNumber: partNumber,
+        // Enforces chunk integrity. The frontend must calculate and send the SHA256 for each chunk.
+        ChecksumAlgorithm: "SHA256",
       });
-
-      return getSignedUrl(s3Client, uploadPartCommand, { expiresIn });
+      return getSignedUrl(s3Client, command, { expiresIn });
     }),
   );
-
-  return { uploadId, partUrls };
+  return partUrls;
 };
 
-/**
- * Generates a secure, expiring download URL.
- * Adds CacheControl headers so CDNs like Cloudflare can cache the file at the edge.
- */
+export const verifyFileIntegrity = async (
+  bucketName: string,
+  storageKey: string,
+  expectedSha1: string,
+): Promise<boolean> => {
+  const command = new HeadObjectCommand({
+    Bucket: bucketName,
+    Key: storageKey,
+  });
+
+  const response = await s3Client.send(command);
+
+  // B2 S3 API exposes the hash in ChecksumSHA1 or strips quotes from the ETag
+  const cloudSha1 = response.ChecksumSHA1 || response.ETag?.replace(/"/g, "");
+
+  return cloudSha1 === expectedSha1;
+};
+
+export const completeMultipartUpload = async (
+  bucketName: string,
+  storageKey: string,
+  uploadId: string,
+  parts: { ETag: string; PartNumber: number }[],
+): Promise<void> => {
+  const command = new CompleteMultipartUploadCommand({
+    Bucket: bucketName,
+    Key: storageKey,
+    UploadId: uploadId,
+    MultipartUpload: { Parts: parts },
+  });
+  await s3Client.send(command);
+};
+
 export const generateDownloadPresignedUrl = async (
   bucketName: string,
   storageKey: string,
-  expiresIn: number = 900, // 15 minutes
+  expiresIn: number = 900,
 ): Promise<string> => {
   const command = new GetObjectCommand({
     Bucket: bucketName,
     Key: storageKey,
     ResponseCacheControl: "public, max-age=86400",
   });
-
   return getSignedUrl(s3Client, command, { expiresIn });
 };
 
-/**
- * Deletes the actual binary file from Backblaze B2.
- * Called exclusively by your background cleanup worker.
- */
 export const deleteFileFromCloud = async (
   bucketName: string,
   storageKey: string,
@@ -127,19 +143,12 @@ export const deleteFileFromCloud = async (
     await s3Client.send(command);
     return true;
   } catch (error: any) {
-    // If the file is already gone, B2 returns a 404 NoSuchKey.
-    // Treat this as a successful deletion to unblock the worker queue.
-    if (error.name === "NoSuchKey" || error.$metadata?.httpStatusCode === 404) {
+    if (error.name === "NoSuchKey" || error.$metadata?.httpStatusCode === 404)
       return true;
-    }
     throw error;
   }
 };
 
-/**
- * Aborts an incomplete multipart upload to prevent paying for orphaned chunks.
- * Called by the background worker when an upload expires.
- */
 export const abortMultipartUpload = async (
   bucketName: string,
   storageKey: string,
@@ -157,9 +166,8 @@ export const abortMultipartUpload = async (
     if (
       error.name === "NoSuchUpload" ||
       error.$metadata?.httpStatusCode === 404
-    ) {
+    )
       return true;
-    }
     throw error;
   }
 };
