@@ -20,6 +20,7 @@ type ExpiredUploadPayload = Pick<
   "storageKey" | "bucketName" | "multipartUploadId" | "_id"
 >;
 
+// The Upload Flow
 export const createPendingRecord = async (
   data: CreateMediaData,
 ): Promise<MediaDocument> => {
@@ -63,11 +64,13 @@ export const findActiveByChecksum = async (
 
 export const createDuplicateRecord = async (
   uploadedBy: string,
+  originalName: string,
   existingFile: MediaDocument,
+  session?: ClientSession,
 ): Promise<MediaDocument> => {
   const duplicateMedia = new Media({
     uploadedBy,
-    originalName: existingFile.originalName,
+    originalName,
     mimeType: existingFile.mimeType,
     sizeBytes: existingFile.sizeBytes,
     sha1Checksum: existingFile.sha1Checksum,
@@ -75,7 +78,7 @@ export const createDuplicateRecord = async (
     storageKey: existingFile.storageKey,
     status: "completed",
   });
-  return duplicateMedia.save();
+  return duplicateMedia.save({ session });
 };
 
 export const attachMultipartId = async (
@@ -109,6 +112,25 @@ export const finalizeUpload = async (
   ).exec();
 };
 
+export const finalizeUploadAsFailed = async (
+  mediaId: string,
+  session?: ClientSession,
+): Promise<MediaDocument | null> => {
+  return Media.findOneAndUpdate(
+    { _id: mediaId, status: "uploading" },
+    {
+      status: "failed",
+      $unset: { uploadExpiresAt: 1, multipartUploadId: 1 },
+    },
+    {
+      new: true,
+      session,
+    },
+  ).exec();
+};
+
+// The Read and Dashboard Flow (Consumed by MediaController)
+
 export const getPaginatedUserMedia = async (
   userId: string,
   page: number = 1,
@@ -136,25 +158,61 @@ export const getAccessibleFile = async (
   }).exec();
 };
 
+export const findById = async (
+  mediaId: string,
+): Promise<MediaDocument | null> => {
+  return Media.findById(mediaId).exec();
+};
+
+// The Deletion Flow
+
 export const softDeleteMedia = async (
   mediaId: string,
   userId: string,
+  session?: ClientSession,
 ): Promise<MediaDocument | null> => {
   return Media.findOneAndUpdate(
     { _id: mediaId, uploadedBy: userId, deletedAt: null },
     { deletedAt: new Date() },
-    { new: true },
+    { new: true, session },
   ).exec();
 };
 
-export const fetchFilesForCloudPurge = async (
-  limit: number = 10,
+// Consumed by BullMQ Jobs
+export const fetchOrphanedStorageKeys = async (
+  limit: number = 50,
 ): Promise<CloudPurgePayload[]> => {
-  return Media.find({ deletedAt: { $ne: null }, b2DeletedAt: null })
-    .limit(limit)
-    .lean()
-    .select("storageKey bucketName")
-    .exec();
+  const pipeline = [
+    // Find soft-deleted files not yet purged from B2
+    { $match: { deletedAt: { $ne: null }, b2DeletedAt: null } },
+
+    // Self-join to check if any active record still uses this storageKey
+    {
+      $lookup: {
+        from: "media",
+        let: { key: "$storageKey" },
+        pipeline: [
+          {
+            $match: {
+              $expr: { $eq: ["$storageKey", "$$key"] },
+              deletedAt: null,
+            },
+          },
+          { $limit: 1 }, // We only need to know if at least one exists
+        ],
+        as: "activeLinks",
+      },
+    },
+
+    // Filter out any file that still has an active link
+    { $match: { activeLinks: { $size: 0 } } },
+
+    // Limit the final result and format the output
+    { $limit: limit },
+    { $project: { _id: 1, storageKey: 1, bucketName: 1 } },
+  ];
+
+  return Media.aggregate<CloudPurgePayload>(pipeline).exec();
 };
 
 export const confirmCloudPurge = async (
@@ -176,7 +234,7 @@ export const fetchExpiredMultipartUploads = async (
   })
     .limit(limit)
     .lean()
-    .select("storageKey bucketName multipartUploadId")
+    .select("_id storageKey bucketName multipartUploadId")
     .exec();
 };
 

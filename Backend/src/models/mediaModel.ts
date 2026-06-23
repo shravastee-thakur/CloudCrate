@@ -79,7 +79,10 @@ const mediaSchema = new Schema<IMedia>(
 
 mediaSchema.index({ uploadedBy: 1, deletedAt: 1 });
 
-mediaSchema.index({ deletedAt: 1, b2DeletedAt: 1 }); // For fetchFilesForCloudPurge
+mediaSchema.index(
+  { deletedAt: 1, b2DeletedAt: 1 },
+  { partialFilterExpression: { deletedAt: { $exists: true, $ne: null } } },
+); // For fetchFilesForCloudPurge
 mediaSchema.index({ uploadExpiresAt: 1 }); // For fetchExpiredMultipartUploads
 mediaSchema.index({ sha1Checksum: 1, status: 1, deletedAt: 1 }); // For findActiveByChecksum
 

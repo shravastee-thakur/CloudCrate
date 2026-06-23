@@ -88,7 +88,7 @@ export const generatePresignedUrlsForChunks = async (
 export const verifyFileIntegrity = async (
   bucketName: string,
   storageKey: string,
-  expectedSha1: string,
+  expectedSizeBytes: number,
 ): Promise<boolean> => {
   const command = new HeadObjectCommand({
     Bucket: bucketName,
@@ -97,23 +97,29 @@ export const verifyFileIntegrity = async (
 
   const response = await s3Client.send(command);
 
-  // B2 S3 API exposes the hash in ChecksumSHA1 or strips quotes from the ETag
-  const cloudSha1 = response.ChecksumSHA1 || response.ETag?.replace(/"/g, "");
-
-  return cloudSha1 === expectedSha1;
+  // For multipart uploads, ETag is a composite hash, not the original file hash.
+  // Since we enforce ChecksumSHA256 on each part, S3/B2 guarantees chunk integrity.
+  // We only need to verify the final assembled file size matches.
+  return response.ContentLength === expectedSizeBytes;
 };
 
 export const completeMultipartUpload = async (
   bucketName: string,
   storageKey: string,
   uploadId: string,
-  parts: { ETag: string; PartNumber: number }[],
+  parts: { ETag: string; PartNumber: number; ChecksumSHA256?: string }[],
 ): Promise<void> => {
   const command = new CompleteMultipartUploadCommand({
     Bucket: bucketName,
     Key: storageKey,
     UploadId: uploadId,
-    MultipartUpload: { Parts: parts },
+    MultipartUpload: {
+      Parts: parts.map((p) => ({
+        ETag: p.ETag,
+        PartNumber: p.PartNumber,
+        ChecksumSHA256: p.ChecksumSHA256,
+      })),
+    },
   });
   await s3Client.send(command);
 };

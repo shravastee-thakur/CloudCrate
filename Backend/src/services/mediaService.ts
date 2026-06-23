@@ -1,9 +1,10 @@
+// services/mediaService.ts
 import mongoose, { ClientSession } from "mongoose";
 import * as mediaRepo from "../repositories/mediaRepo.js";
+import * as storageTransactionRepo from "../repositories/storageTransactionRepo.js";
 import { CreateMediaData, MediaDocument } from "../repositories/mediaRepo.js";
 import { ApiError } from "../utils/apiError.js";
 import * as b2StorageService from "./b2StorageService.js";
-// import * as storageTransactionRepo from "../repositories/storageTransactionRepo.js";
 
 // Data Transfer Object
 export interface MediaDto {
@@ -46,18 +47,15 @@ const mapToMediaDto = (media: MediaDocument): MediaDto => {
   };
 };
 
-//STEP 1: Initialize the upload.
-// Handles deduplication and requests a Multipart Upload ID from Floci/B2.
+// STEP 1: Initialize the upload.
 export const initializeUpload = async (
   mediaData: CreateMediaData,
 ): Promise<{ media: MediaDto; uploadId?: string; isDuplicate: boolean }> => {
-  // Validate file size bounds
   const MAX_FILE_SIZE = 500 * 1024 * 1024;
   if (mediaData.sizeBytes <= 0 || mediaData.sizeBytes > MAX_FILE_SIZE) {
     throw new ApiError(400, "Invalid file size");
   }
 
-  // Deduplication Check: Does this file already exist on our servers?
   const existingFile = await mediaRepo.findActiveByChecksum(
     mediaData.sha1Checksum,
   );
@@ -68,14 +66,23 @@ export const initializeUpload = async (
 
     try {
       session.startTransaction();
-      // Create a new DB record for this user, but point it to the EXACT SAME storageKey.
+
       savedDuplicate = await mediaRepo.createDuplicateRecord(
         mediaData.uploadedBy.toString(),
         existingFile,
+        session,
       );
 
-      // You MUST insert a StorageTransaction ledger entry here inside the session
-      // await storageTransactionRepo.createTransaction({ userId: mediaData.uploadedBy, mediaId: savedDuplicate._id, sizeDeltaBytes: existingFile.sizeBytes, type: 'upload' }, session);
+      // Deduct quota for the duplicate file mapping
+      await storageTransactionRepo.createTransaction(
+        {
+          userId: mediaData.uploadedBy,
+          mediaId: savedDuplicate._id,
+          sizeDeltaBytes: existingFile.sizeBytes,
+          type: "upload",
+        },
+        session,
+      );
 
       await session.commitTransaction();
     } catch (error) {
@@ -85,20 +92,17 @@ export const initializeUpload = async (
       session.endSession();
     }
 
-    return { media: mapToMediaDto(savedDuplicate), isDuplicate: true };
+    return { media: mapToMediaDto(savedDuplicate!), isDuplicate: true };
   }
 
-  //  If no duplicate, create a pending record in MongoDB
   const pendingMedia = await mediaRepo.createPendingRecord(mediaData);
 
-  //  Tell Floci/B2 we are starting a chunked upload
   const uploadId = await b2StorageService.initiateMultipartUpload(
     pendingMedia.bucketName,
     pendingMedia.storageKey,
     pendingMedia.mimeType,
   );
 
-  // Save the Floci/B2 upload ID to our database so background workers can abort it if the user bails out
   const updatedMedia = await mediaRepo.attachMultipartId(
     pendingMedia._id.toString(),
     uploadId,
@@ -114,7 +118,7 @@ export const initializeUpload = async (
   };
 };
 
-//  STEP 2: Generate Presigned URLs for individual chunks
+// STEP 2: Generate Presigned URLs for individual chunks
 export const getChunkUploadUrls = async (
   mediaId: string,
   userId: string,
@@ -127,7 +131,6 @@ export const getChunkUploadUrls = async (
     throw new ApiError(401, "Invalid upload state.");
   }
 
-  // Generate secure, short-lived URLs for the frontend to upload chunks directly to Floci/B2
   const urls = await b2StorageService.generatePresignedUrlsForChunks(
     media.bucketName,
     media.storageKey,
@@ -139,8 +142,6 @@ export const getChunkUploadUrls = async (
 };
 
 // STEP 3: Finalize the upload.
-// Tells Floci/B2 to stitch chunks together, then updates the DB state via a Transaction.
-
 export const completeUpload = async (
   mediaId: string,
   userId: string,
@@ -151,7 +152,6 @@ export const completeUpload = async (
   if (!media || !media.multipartUploadId)
     throw new ApiError(404, "Media not found or unauthorized");
 
-  // Tell Floci/B2 to stitch the chunks together and verify ETags
   await b2StorageService.completeMultipartUpload(
     media.bucketName,
     media.storageKey,
@@ -159,41 +159,61 @@ export const completeUpload = async (
     parts,
   );
 
-  // Start a MongoDB Transaction to finalize DB state securely
+  const isValid = await b2StorageService.verifyFileIntegrity(
+    media.bucketName,
+    media.storageKey,
+    media.sizeBytes,
+  );
+
+  if (!isValid) {
+    await b2StorageService.deleteFileFromCloud(
+      media.bucketName,
+      media.storageKey,
+    );
+    await mediaRepo.finalizeUploadAsFailed(mediaId);
+    throw new ApiError(422, "File integrity check failed");
+  }
+
   const session: ClientSession = await mongoose.startSession();
   let finalizedMedia: MediaDocument | null = null;
 
   try {
     session.startTransaction();
 
-    //Mark media as "completed" and remove the expiration timer
     finalizedMedia = await mediaRepo.finalizeUpload(
       media._id.toString(),
       session,
     );
 
-    // You MUST insert a StorageTransaction ledger entry here inside the session
-    // await storageTransactionRepo.createTransaction({ userId, mediaId: media._id, sizeDeltaBytes: media.sizeBytes, type: 'upload' }, session);
+    // Deduct quota for the newly completed upload
+    await storageTransactionRepo.createTransaction(
+      {
+        userId,
+        mediaId: media._id,
+        sizeDeltaBytes: media.sizeBytes,
+        type: "upload",
+      },
+      session,
+    );
 
     await session.commitTransaction();
   } catch (error) {
     await session.abortTransaction();
     throw new ApiError(
-      401,
-      `Database transaction failed during upload completion: ${error}`,
+      500,
+      `Database transaction failed during upload completion`,
     );
   } finally {
     session.endSession();
   }
 
   if (!finalizedMedia)
-    throw new ApiError(401, "Failed to finalize media document in database");
+    throw new ApiError(500, "Failed to finalize media document in database");
 
   return mapToMediaDto(finalizedMedia);
 };
 
 // Fetch files for the user's dashboard
-
 export const getUserDashboardMedia = async (
   userId: string,
   page: number,
@@ -215,11 +235,49 @@ export const deleteUserMedia = async (
   mediaId: string,
   userId: string,
 ): Promise<boolean> => {
-  const deletedMedia = await mediaRepo.softDeleteMedia(mediaId, userId);
-  if (!deletedMedia)
-    throw new ApiError(404, "Media not found or already deleted");
+  const media = await mediaRepo.getAccessibleFile(mediaId, userId);
+  if (!media) throw new ApiError(404, "Media not found");
 
-  // (Future Step) Dispatch a BullMQ job to actually delete from B2, or log to AuditLog
+  // Cloud operations happen outside the DB transaction.
+  // If this fails, the background worker will catch the expired upload later.
+  if (media.multipartUploadId && media.status !== "completed") {
+    await b2StorageService.abortMultipartUpload(
+      media.bucketName,
+      media.storageKey,
+      media.multipartUploadId,
+    );
+  }
 
-  return true;
+  const session = await mongoose.startSession();
+
+  try {
+    session.startTransaction();
+
+    if (media.multipartUploadId && media.status !== "completed") {
+      await mediaRepo.finalizeUploadAsFailed(mediaId, session);
+    } else {
+      // Only refund quota if the file was fully completed and taking up user space
+      if (media.status === "completed") {
+        await storageTransactionRepo.createTransaction(
+          {
+            userId,
+            mediaId: media._id,
+            sizeDeltaBytes: -Math.abs(media.sizeBytes), // Ensure negative value for refunds
+            type: "deletion",
+          },
+          session,
+        );
+      }
+
+      await mediaRepo.softDeleteMedia(mediaId, userId, session);
+    }
+
+    await session.commitTransaction();
+    return true;
+  } catch (error) {
+    await session.abortTransaction();
+    throw new ApiError(500, "Failed to process media deletion securely");
+  } finally {
+    session.endSession();
+  }
 };
