@@ -1,30 +1,52 @@
-// repositories/storageTransactionRepo.ts
 import StorageTransaction, {
   IStorageTransaction,
 } from "../models/storageTransactionModel.js";
-import { ClientSession, Types } from "mongoose";
+import { HydratedDocument } from "mongoose";
+import mongoose from "mongoose";
 
-export interface CreateTransactionData {
-  userId: string | Types.ObjectId;
-  mediaId: string | Types.ObjectId;
+export type StorageTransactionDocument = HydratedDocument<IStorageTransaction>;
+
+export interface CreateStorageTransactionInput {
+  userId: string;
+  mediaId?: string;
   type: "upload" | "deletion" | "adjustment";
   sizeDeltaBytes: number;
+  idempotencyKey: string;
 }
 
-export const createTransaction = async (
-  data: CreateTransactionData,
-  session?: ClientSession,
-): Promise<IStorageTransaction> => {
-  // Deterministic key prevents duplicate ledger entries if the client retries the request
-  const idempotencyKey = `${data.type}:${data.mediaId.toString()}`;
-
-  const transaction = new StorageTransaction({
-    userId: new Types.ObjectId(data.userId.toString()),
-    mediaId: new Types.ObjectId(data.mediaId.toString()),
+export const recordTransaction = async (
+  data: CreateStorageTransactionInput,
+): Promise<StorageTransactionDocument> => {
+  return StorageTransaction.create({
+    userId: new mongoose.Types.ObjectId(data.userId),
+    mediaId: data.mediaId
+      ? new mongoose.Types.ObjectId(data.mediaId)
+      : undefined,
     type: data.type,
     sizeDeltaBytes: data.sizeDeltaBytes,
-    idempotencyKey,
+    idempotencyKey: data.idempotencyKey,
   });
+};
 
-  return transaction.save({ session });
+export const calculateTotalStorage = async (
+  userId: string,
+): Promise<number> => {
+  const result = await StorageTransaction.aggregate([
+    {
+      $match: {
+        userId: new mongoose.Types.ObjectId(userId),
+      },
+    },
+    {
+      $group: {
+        _id: null,
+        totalStorage: { $sum: "$sizeDeltaBytes" },
+      },
+    },
+  ]);
+
+  if (result.length === 0) return 0;
+
+  const total = result[0].totalStorage;
+  return total > 0 ? total : 0;
 };

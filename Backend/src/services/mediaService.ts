@@ -1,12 +1,11 @@
-// services/mediaService.ts
-import mongoose, { ClientSession } from "mongoose";
+import mongoose from "mongoose";
 import * as mediaRepo from "../repositories/mediaRepo.js";
 import * as storageTransactionRepo from "../repositories/storageTransactionRepo.js";
 import { CreateMediaData, MediaDocument } from "../repositories/mediaRepo.js";
 import { ApiError } from "../utils/apiError.js";
 import * as b2StorageService from "./b2StorageService.js";
+import { redis } from "../config/redis.js";
 
-// Data Transfer Object
 export interface MediaDto {
   _id: string;
   bucketName: string;
@@ -23,6 +22,37 @@ export interface MediaDto {
   b2DeletedAt?: Date;
   createdAt?: Date;
   updatedAt?: Date;
+}
+
+interface InitializeUploadDuplicateResponse {
+  isDuplicate: true;
+  media: MediaDto;
+  message: string;
+}
+
+interface InitializeUploadNewResponse {
+  isDuplicate: false;
+  media: MediaDto;
+  uploadId: string;
+  chunkSize: number;
+  chunkUrls: { partNumber: number; url: string }[];
+}
+
+type InitializeUploadResponse =
+  | InitializeUploadDuplicateResponse
+  | InitializeUploadNewResponse;
+
+interface DashboardResponse {
+  files: MediaDto[];
+  totalCount: number;
+  page: number;
+  limit: number;
+}
+
+interface DownloadUrlResponse {
+  downloadUrl: string;
+  originalName: string;
+  mimeType: string;
 }
 
 const mapToMediaDto = (media: MediaDocument): MediaDto => {
@@ -47,237 +77,194 @@ const mapToMediaDto = (media: MediaDocument): MediaDto => {
   };
 };
 
-// STEP 1: Initialize the upload.
-export const initializeUpload = async (
-  mediaData: CreateMediaData,
-): Promise<{ media: MediaDto; uploadId?: string; isDuplicate: boolean }> => {
-  const MAX_FILE_SIZE = 500 * 1024 * 1024;
-  if (mediaData.sizeBytes <= 0 || mediaData.sizeBytes > MAX_FILE_SIZE) {
-    throw new ApiError(400, "Invalid file size");
-  }
+const CHECK_QUOTA_LUA = `
+  local currentUsed = tonumber(redis.call('GET', KEYS[1]) or "0")
+  local limit = tonumber(ARGV[1])
+  local fileSize = tonumber(ARGV[2])
 
-  const existingFile = await mediaRepo.findActiveByChecksum(
-    mediaData.sha1Checksum,
+  if (currentUsed + fileSize) > limit then
+      return 0
+  end
+
+  redis.call('INCRBY', KEYS[1], fileSize)
+  return 1
+`;
+
+type InitiateUploadRequest = Omit<CreateMediaData, "uploadedBy">;
+
+export const initializeUpload = async (
+  userId: string,
+  storageLimit: number,
+  payload: InitiateUploadRequest,
+): Promise<InitializeUploadResponse> => {
+  const redisKey = `user:storage:used:${userId}`;
+
+  const quotaResult = await redis.eval(
+    CHECK_QUOTA_LUA,
+    1,
+    redisKey,
+    storageLimit.toString(),
+    payload.sizeBytes.toString(),
   );
 
-  if (existingFile) {
-    const session = await mongoose.startSession();
-    let savedDuplicate: MediaDocument | null = null;
+  if (quotaResult === 0) {
+    throw new ApiError(402, "Storage limit exceeded");
+  }
 
-    try {
-      session.startTransaction();
+  try {
+    const existingFile = await mediaRepo.findActiveByChecksum(
+      payload.sha1Checksum,
+    );
 
-      savedDuplicate = await mediaRepo.createDuplicateRecord(
-        mediaData.uploadedBy.toString(),
+    if (existingFile) {
+      const duplicateRecord = await mediaRepo.createDuplicateRecord(
+        userId,
+        payload.originalName,
         existingFile,
-        session,
       );
 
-      // Deduct quota for the duplicate file mapping
-      await storageTransactionRepo.createTransaction(
-        {
-          userId: mediaData.uploadedBy,
-          mediaId: savedDuplicate._id,
-          sizeDeltaBytes: existingFile.sizeBytes,
-          type: "upload",
-        },
-        session,
-      );
+      await storageTransactionRepo.recordTransaction({
+        userId: userId,
+        mediaId: duplicateRecord._id.toString(),
+        type: "upload",
+        sizeDeltaBytes: payload.sizeBytes,
+        idempotencyKey: `upload_${duplicateRecord._id.toString()}`,
+      });
 
-      await session.commitTransaction();
-    } catch (error) {
-      await session.abortTransaction();
-      throw new ApiError(500, "Failed to process duplicate upload");
-    } finally {
-      session.endSession();
+      return {
+        isDuplicate: true,
+        media: mapToMediaDto(duplicateRecord),
+        message: "File already exists. Upload skipped.",
+      };
     }
 
-    return { media: mapToMediaDto(savedDuplicate!), isDuplicate: true };
+    const mediaData: CreateMediaData = {
+      ...payload,
+      uploadedBy: new mongoose.Types.ObjectId(userId),
+    };
+
+    const pendingRecord = await mediaRepo.createPendingRecord(mediaData);
+
+    const uploadId = await b2StorageService.initiateMultipartUpload(
+      payload.bucketName,
+      pendingRecord.storageKey,
+      payload.mimeType,
+    );
+
+    const updatedRecord = await mediaRepo.attachMultipartId(
+      pendingRecord._id.toString(),
+      uploadId,
+    );
+
+    if (!updatedRecord) {
+      throw new ApiError(500, "Failed to attach multipart ID");
+    }
+
+    const chunkSize = 10 * 1024 * 1024;
+    const numberOfChunks = Math.ceil(payload.sizeBytes / chunkSize);
+
+    const chunkUrls = await b2StorageService.generatePresignedChunkUrls(
+      payload.bucketName,
+      pendingRecord.storageKey,
+      uploadId,
+      numberOfChunks,
+    );
+
+    return {
+      isDuplicate: false,
+      media: mapToMediaDto(updatedRecord),
+      uploadId,
+      chunkSize,
+      chunkUrls,
+    };
+  } catch (error) {
+    await redis.decrby(redisKey, payload.sizeBytes);
+    throw error;
   }
-
-  const pendingMedia = await mediaRepo.createPendingRecord(mediaData);
-
-  const uploadId = await b2StorageService.initiateMultipartUpload(
-    pendingMedia.bucketName,
-    pendingMedia.storageKey,
-    pendingMedia.mimeType,
-  );
-
-  const updatedMedia = await mediaRepo.attachMultipartId(
-    pendingMedia._id.toString(),
-    uploadId,
-  );
-
-  if (!updatedMedia)
-    throw new ApiError(404, "Failed to attach multipart ID to media record");
-
-  return {
-    media: mapToMediaDto(updatedMedia),
-    uploadId: uploadId,
-    isDuplicate: false,
-  };
 };
 
-// STEP 2: Generate Presigned URLs for individual chunks
-export const getChunkUploadUrls = async (
+export const finalizeUpload = async (
   mediaId: string,
-  userId: string,
-  totalChunks: number,
-): Promise<{ urls: string[] }> => {
-  const media = await mediaRepo.getAccessibleFile(mediaId, userId);
-
-  if (!media) throw new ApiError(404, "Media not found");
-  if (media.status !== "uploading" || !media.multipartUploadId) {
-    throw new ApiError(401, "Invalid upload state.");
-  }
-
-  const urls = await b2StorageService.generatePresignedUrlsForChunks(
-    media.bucketName,
-    media.storageKey,
-    media.multipartUploadId,
-    totalChunks,
-  );
-
-  return { urls };
-};
-
-// STEP 3: Finalize the upload.
-export const completeUpload = async (
-  mediaId: string,
-  userId: string,
-  parts: { PartNumber: number; ETag: string }[],
+  bucketName: string,
+  storageKey: string,
+  uploadId: string,
+  parts: { ETag: string; PartNumber: number }[],
 ): Promise<MediaDto> => {
-  const media = await mediaRepo.getAccessibleFile(mediaId, userId);
-
-  if (!media || !media.multipartUploadId)
-    throw new ApiError(404, "Media not found or unauthorized");
-
   await b2StorageService.completeMultipartUpload(
-    media.bucketName,
-    media.storageKey,
-    media.multipartUploadId,
+    bucketName,
+    storageKey,
+    uploadId,
     parts,
   );
 
-  const isValid = await b2StorageService.verifyFileIntegrity(
-    media.bucketName,
-    media.storageKey,
-    media.sizeBytes,
-  );
+  const finalizedRecord = await mediaRepo.finalizeUpload(mediaId);
 
-  if (!isValid) {
-    await b2StorageService.deleteFileFromCloud(
-      media.bucketName,
-      media.storageKey,
-    );
-    await mediaRepo.finalizeUploadAsFailed(mediaId);
-    throw new ApiError(422, "File integrity check failed");
+  if (!finalizedRecord) {
+    throw new ApiError(404, "Upload record not found or already finalized");
   }
 
-  const session: ClientSession = await mongoose.startSession();
-  let finalizedMedia: MediaDocument | null = null;
+  await storageTransactionRepo.recordTransaction({
+    userId: finalizedRecord.uploadedBy.toString(),
+    mediaId: finalizedRecord._id.toString(),
+    type: "upload",
+    sizeDeltaBytes: finalizedRecord.sizeBytes,
+    idempotencyKey: `upload_${finalizedRecord._id.toString()}`,
+  });
 
-  try {
-    session.startTransaction();
-
-    finalizedMedia = await mediaRepo.finalizeUpload(
-      media._id.toString(),
-      session,
-    );
-
-    // Deduct quota for the newly completed upload
-    await storageTransactionRepo.createTransaction(
-      {
-        userId,
-        mediaId: media._id,
-        sizeDeltaBytes: media.sizeBytes,
-        type: "upload",
-      },
-      session,
-    );
-
-    await session.commitTransaction();
-  } catch (error) {
-    await session.abortTransaction();
-    throw new ApiError(
-      500,
-      `Database transaction failed during upload completion`,
-    );
-  } finally {
-    session.endSession();
-  }
-
-  if (!finalizedMedia)
-    throw new ApiError(500, "Failed to finalize media document in database");
-
-  return mapToMediaDto(finalizedMedia);
+  return mapToMediaDto(finalizedRecord);
 };
 
-// Fetch files for the user's dashboard
 export const getUserDashboardMedia = async (
   userId: string,
   page: number,
   limit: number,
-): Promise<{ files: MediaDto[]; totalCount: number }> => {
+): Promise<DashboardResponse> => {
   const { files, totalCount } = await mediaRepo.getPaginatedUserMedia(
     userId,
     page,
     limit,
   );
+
   return {
     files: files.map(mapToMediaDto),
     totalCount,
+    page,
+    limit,
   };
 };
 
-// Soft delete a file
-export const deleteUserMedia = async (
+export const getSecureDownloadUrl = async (
+  userId: string,
+  mediaId: string,
+): Promise<DownloadUrlResponse> => {
+  const file = await mediaRepo.getAccessibleFile(mediaId, userId);
+
+  if (!file) {
+    throw new ApiError(404, "File not found or access denied");
+  }
+
+  const downloadUrl = await b2StorageService.generateDownloadPresignedUrl(
+    file.bucketName,
+    file.storageKey,
+    900,
+  );
+
+  return {
+    downloadUrl,
+    originalName: file.originalName,
+    mimeType: file.mimeType,
+  };
+};
+
+export const softDeleteMedia = async (
   mediaId: string,
   userId: string,
-): Promise<boolean> => {
-  const media = await mediaRepo.getAccessibleFile(mediaId, userId);
-  if (!media) throw new ApiError(404, "Media not found");
+): Promise<MediaDto> => {
+  const deletedRecord = await mediaRepo.softDeleteMedia(mediaId, userId);
 
-  // Cloud operations happen outside the DB transaction.
-  // If this fails, the background worker will catch the expired upload later.
-  if (media.multipartUploadId && media.status !== "completed") {
-    await b2StorageService.abortMultipartUpload(
-      media.bucketName,
-      media.storageKey,
-      media.multipartUploadId,
-    );
+  if (!deletedRecord) {
+    throw new ApiError(404, "File not found or already deleted");
   }
 
-  const session = await mongoose.startSession();
-
-  try {
-    session.startTransaction();
-
-    if (media.multipartUploadId && media.status !== "completed") {
-      await mediaRepo.finalizeUploadAsFailed(mediaId, session);
-    } else {
-      // Only refund quota if the file was fully completed and taking up user space
-      if (media.status === "completed") {
-        await storageTransactionRepo.createTransaction(
-          {
-            userId,
-            mediaId: media._id,
-            sizeDeltaBytes: -Math.abs(media.sizeBytes), // Ensure negative value for refunds
-            type: "deletion",
-          },
-          session,
-        );
-      }
-
-      await mediaRepo.softDeleteMedia(mediaId, userId, session);
-    }
-
-    await session.commitTransaction();
-    return true;
-  } catch (error) {
-    await session.abortTransaction();
-    throw new ApiError(500, "Failed to process media deletion securely");
-  } finally {
-    session.endSession();
-  }
+  return mapToMediaDto(deletedRecord);
 };

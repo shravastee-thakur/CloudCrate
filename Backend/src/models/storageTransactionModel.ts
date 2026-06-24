@@ -2,7 +2,7 @@ import mongoose, { Schema, Model } from "mongoose";
 
 export interface IStorageTransaction {
   userId: mongoose.Types.ObjectId;
-  mediaId: mongoose.Types.ObjectId;
+  mediaId?: mongoose.Types.ObjectId;
   type: "upload" | "deletion" | "adjustment";
   sizeDeltaBytes: number; // Positive for upload, negative for deletion
   idempotencyKey: string; // Prevents double-charging if a network request retries

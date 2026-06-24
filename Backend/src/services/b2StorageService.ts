@@ -1,157 +1,107 @@
 import {
   S3Client,
-  PutObjectCommand,
-  GetObjectCommand,
-  DeleteObjectCommand,
-  AbortMultipartUploadCommand,
   CreateMultipartUploadCommand,
   UploadPartCommand,
   CompleteMultipartUploadCommand,
-  HeadObjectCommand,
+  AbortMultipartUploadCommand,
+  GetObjectCommand,
+  DeleteObjectCommand,
+  CompletedPart,
 } from "@aws-sdk/client-s3";
 import { getSignedUrl } from "@aws-sdk/s3-request-presigner";
+import { ApiError } from "../utils/apiError.js";
+import logger from "../utils/logger.js";
 
-const IS_LOCAL = process.env.NODE_ENV === "development";
-const S3_ENDPOINT = process.env.S3_ENDPOINT || "http://localhost:9000";
-const S3_REGION = process.env.S3_REGION || "us-east-005";
-const S3_ACCESS_KEY = process.env.S3_ACCESS_KEY || "floci_access";
-const S3_SECRET_KEY = process.env.S3_SECRET_KEY || "floci_secret";
-
-const getS3Client = (): S3Client => {
-  return new S3Client({
-    region: S3_REGION,
-    endpoint: S3_ENDPOINT,
-    credentials: {
-      accessKeyId: S3_ACCESS_KEY,
-      secretAccessKey: S3_SECRET_KEY,
-    },
-    forcePathStyle: IS_LOCAL,
-  });
-};
-
-const s3Client = getS3Client();
-
-export const generateUploadPresignedUrl = async (
-  bucketName: string,
-  storageKey: string,
-  mimeType: string,
-  sha1Checksum: string,
-  expiresIn: number = 3600,
-): Promise<string> => {
-  const command = new PutObjectCommand({
-    Bucket: bucketName,
-    Key: storageKey,
-    ContentType: mimeType,
-    ChecksumSHA1: sha1Checksum,
-  });
-  return getSignedUrl(s3Client, command, { expiresIn });
-};
+const s3Client = new S3Client({
+  region: process.env.B2_REGION || "us-east-1",
+  endpoint: process.env.B2_ENDPOINT,
+  credentials: {
+    accessKeyId: process.env.B2_ACCESS_KEY_ID!,
+    secretAccessKey: process.env.B2_SECRET_ACCESS_KEY!,
+  },
+  forcePathStyle: true,
+});
 
 export const initiateMultipartUpload = async (
   bucketName: string,
   storageKey: string,
   mimeType: string,
 ): Promise<string> => {
-  const command = new CreateMultipartUploadCommand({
-    Bucket: bucketName,
-    Key: storageKey,
-    ContentType: mimeType,
-  });
-  const response = await s3Client.send(command);
-  return response.UploadId!;
+  try {
+    const command = new CreateMultipartUploadCommand({
+      Bucket: bucketName,
+      Key: storageKey,
+      ContentType: mimeType,
+    });
+    const response = await s3Client.send(command);
+    if (!response.UploadId) {
+      throw new ApiError(502, "B2 did not return an UploadId");
+    }
+    return response.UploadId!;
+  } catch (error) {
+    logger.error(
+      `Failed to initiate multipart upload for ${storageKey}:`,
+      error,
+    );
+    throw new ApiError(500, "Failed to initialize file upload process.");
+  }
 };
 
-export const generatePresignedUrlsForChunks = async (
+export const generatePresignedChunkUrls = async (
   bucketName: string,
   storageKey: string,
   uploadId: string,
-  partCount: number,
-  expiresIn: number = 86400,
-): Promise<string[]> => {
-  const partUrls = await Promise.all(
-    Array.from({ length: partCount }, async (_, i) => {
-      const partNumber = i + 1;
+  numberOfChunks: number,
+): Promise<{ partNumber: number; url: string }[]> => {
+  try {
+    const urls: { partNumber: number; url: string }[] = [];
+
+    // S3 part numbers must start at 1, not 0
+    for (let i = 1; i <= numberOfChunks; i++) {
       const command = new UploadPartCommand({
         Bucket: bucketName,
         Key: storageKey,
         UploadId: uploadId,
-        PartNumber: partNumber,
-        // Enforces chunk integrity. The frontend must calculate and send the SHA256 for each chunk.
-        ChecksumAlgorithm: "SHA256",
+        PartNumber: i,
       });
-      return getSignedUrl(s3Client, command, { expiresIn });
-    }),
-  );
-  return partUrls;
-};
 
-export const verifyFileIntegrity = async (
-  bucketName: string,
-  storageKey: string,
-  expectedSizeBytes: number,
-): Promise<boolean> => {
-  const command = new HeadObjectCommand({
-    Bucket: bucketName,
-    Key: storageKey,
-  });
+      // URLs expire in 1 hour. Adjust if your frontend needs more time.
+      const url = await getSignedUrl(s3Client, command, { expiresIn: 3600 });
+      urls.push({ partNumber: i, url });
+    }
 
-  const response = await s3Client.send(command);
-
-  // For multipart uploads, ETag is a composite hash, not the original file hash.
-  // Since we enforce ChecksumSHA256 on each part, S3/B2 guarantees chunk integrity.
-  // We only need to verify the final assembled file size matches.
-  return response.ContentLength === expectedSizeBytes;
+    return urls;
+  } catch (error) {
+    logger.error(
+      `Failed to generate presigned chunk URLs for ${storageKey}:`,
+      error,
+    );
+    throw new ApiError(500, "Failed to generate upload links for file chunks.");
+  }
 };
 
 export const completeMultipartUpload = async (
   bucketName: string,
   storageKey: string,
   uploadId: string,
-  parts: { ETag: string; PartNumber: number; ChecksumSHA256?: string }[],
+  parts: CompletedPart[],
 ): Promise<void> => {
-  const command = new CompleteMultipartUploadCommand({
-    Bucket: bucketName,
-    Key: storageKey,
-    UploadId: uploadId,
-    MultipartUpload: {
-      Parts: parts.map((p) => ({
-        ETag: p.ETag,
-        PartNumber: p.PartNumber,
-        ChecksumSHA256: p.ChecksumSHA256,
-      })),
-    },
-  });
-  await s3Client.send(command);
-};
-
-export const generateDownloadPresignedUrl = async (
-  bucketName: string,
-  storageKey: string,
-  expiresIn: number = 900,
-): Promise<string> => {
-  const command = new GetObjectCommand({
-    Bucket: bucketName,
-    Key: storageKey,
-    ResponseCacheControl: "public, max-age=86400",
-  });
-  return getSignedUrl(s3Client, command, { expiresIn });
-};
-
-export const deleteFileFromCloud = async (
-  bucketName: string,
-  storageKey: string,
-): Promise<boolean> => {
   try {
-    const command = new DeleteObjectCommand({
+    const command = new CompleteMultipartUploadCommand({
       Bucket: bucketName,
       Key: storageKey,
+      UploadId: uploadId,
+      MultipartUpload: {
+        Parts: parts,
+      },
     });
     await s3Client.send(command);
-    return true;
-  } catch (error: any) {
-    if (error.name === "NoSuchKey" || error.$metadata?.httpStatusCode === 404)
-      return true;
-    throw error;
+  } catch (error) {
+    logger.error(
+      `Failed to complete multipart upload for ${storageKey}:`,
+      error,
+    );
+    throw new ApiError(500, "Failed to finalize file upload.");
   }
 };
 
@@ -159,7 +109,7 @@ export const abortMultipartUpload = async (
   bucketName: string,
   storageKey: string,
   uploadId: string,
-): Promise<boolean> => {
+): Promise<void> => {
   try {
     const command = new AbortMultipartUploadCommand({
       Bucket: bucketName,
@@ -167,13 +117,40 @@ export const abortMultipartUpload = async (
       UploadId: uploadId,
     });
     await s3Client.send(command);
-    return true;
+  } catch (error) {
+    logger.warn(`Abort multipart upload warning for ${storageKey}:`, error);
+  }
+};
+
+export const generateDownloadPresignedUrl = async (
+  bucketName: string,
+  storageKey: string,
+  expiresIn: number = 900,
+): Promise<string> => {
+  try {
+    const command = new GetObjectCommand({
+      Bucket: bucketName,
+      Key: storageKey,
+    });
+    return await getSignedUrl(s3Client, command, { expiresIn });
+  } catch (error) {
+    logger.error(`Failed to generate download URL for ${storageKey}:`, error);
+    throw new ApiError(500, "Failed to generate file download link.");
+  }
+};
+
+export const deleteFileFromCloud = async (
+  bucketName: string,
+  storageKey: string,
+): Promise<void> => {
+  try {
+    const command = new DeleteObjectCommand({
+      Bucket: bucketName,
+      Key: storageKey,
+    });
+    await s3Client.send(command);
   } catch (error: any) {
-    if (
-      error.name === "NoSuchUpload" ||
-      error.$metadata?.httpStatusCode === 404
-    )
-      return true;
-    throw error;
+    logger.error(`Failed to delete file from storage ${storageKey}:`, error);
+    throw new ApiError(500, "Failed to delete file from cloud storage.");
   }
 };
