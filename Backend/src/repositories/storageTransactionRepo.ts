@@ -17,15 +17,22 @@ export interface CreateStorageTransactionInput {
 export const recordTransaction = async (
   data: CreateStorageTransactionInput,
 ): Promise<StorageTransactionDocument> => {
-  return StorageTransaction.create({
-    userId: new mongoose.Types.ObjectId(data.userId),
-    mediaId: data.mediaId
-      ? new mongoose.Types.ObjectId(data.mediaId)
-      : undefined,
-    type: data.type,
-    sizeDeltaBytes: data.sizeDeltaBytes,
-    idempotencyKey: data.idempotencyKey,
-  });
+  try {
+    return await StorageTransaction.create({
+      userId: new mongoose.Types.ObjectId(data.userId),
+      mediaId: data.mediaId
+        ? new mongoose.Types.ObjectId(data.mediaId)
+        : undefined,
+      type: data.type,
+      sizeDeltaBytes: data.sizeDeltaBytes,
+      idempotencyKey: data.idempotencyKey,
+    });
+  } catch (error: any) {
+    if (error.code === 11000) {
+      return null as any;
+    }
+    throw error;
+  }
 };
 
 export const calculateTotalStorage = async (

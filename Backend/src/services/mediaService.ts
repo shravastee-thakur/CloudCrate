@@ -1,10 +1,12 @@
 import mongoose from "mongoose";
 import * as mediaRepo from "../repositories/mediaRepo.js";
+import * as userRepo from "../repositories/userRepo.js";
 import * as storageTransactionRepo from "../repositories/storageTransactionRepo.js";
 import { CreateMediaData, MediaDocument } from "../repositories/mediaRepo.js";
 import { ApiError } from "../utils/apiError.js";
 import * as b2StorageService from "./b2StorageService.js";
 import { redis } from "../config/redis.js";
+import { initializeUploadInput } from "../validators/mediaValidator.js";
 
 export interface MediaDto {
   _id: string;
@@ -90,20 +92,22 @@ const CHECK_QUOTA_LUA = `
   return 1
 `;
 
-type InitiateUploadRequest = Omit<CreateMediaData, "uploadedBy">;
-
 export const initializeUpload = async (
   userId: string,
-  storageLimit: number,
-  payload: InitiateUploadRequest,
+  payload: initializeUploadInput,
 ): Promise<InitializeUploadResponse> => {
+  const user = await userRepo.findById(userId);
+  if (!user) {
+    throw new ApiError(404, "User not found");
+  }
+
   const redisKey = `user:storage:used:${userId}`;
 
   const quotaResult = await redis.eval(
     CHECK_QUOTA_LUA,
     1,
     redisKey,
-    storageLimit.toString(),
+    user.storageLimit.toString(),
     payload.sizeBytes.toString(),
   );
 
@@ -265,6 +269,20 @@ export const softDeleteMedia = async (
   if (!deletedRecord) {
     throw new ApiError(404, "File not found or already deleted");
   }
+
+  const redisKey = `user:storage:used:${userId}`;
+  
+  // Refund the storage quota in Redis immediately
+  await redis.decrby(redisKey, deletedRecord.sizeBytes);
+
+  // Record the negative transaction in the ledger
+  await storageTransactionRepo.recordTransaction({
+    userId: userId,
+    mediaId: deletedRecord._id.toString(),
+    type: "deletion",
+    sizeDeltaBytes: -deletedRecord.sizeBytes, 
+    idempotencyKey: `deletion_${deletedRecord._id.toString()}`,
+  });
 
   return mapToMediaDto(deletedRecord);
 };

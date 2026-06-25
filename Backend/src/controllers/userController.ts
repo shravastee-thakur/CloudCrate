@@ -29,7 +29,6 @@ export const createUser = async (
       data: user,
     });
   } catch (error) {
-    logger.error(`Create user error: ${(error as Error).message}`);
     next(error);
   }
 };
@@ -57,7 +56,6 @@ export const createOtpRequest = async (
       user: user._id,
     });
   } catch (error) {
-    logger.error(`Create OTP request error: ${(error as Error).message}`);
     next(error);
   }
 };
@@ -79,7 +77,6 @@ export const createSession = async (
 
     return sendAuthResponse(res, token, user, "Logged in successfully");
   } catch (error) {
-    logger.error(`Create session error: ${(error as Error).message}`);
     next(error);
   }
 };
@@ -104,7 +101,6 @@ export const createToken = async (
       "Token refreshed",
     );
   } catch (error) {
-    logger.error(`Create token error: ${(error as Error).message}`);
     next(error);
   }
 };
@@ -128,7 +124,6 @@ export const createPasswordReset = async (
       message: "Password reset link sent to your email",
     });
   } catch (error) {
-    logger.error(`Create password reset error: ${(error as Error).message}`);
     next(error);
   }
 };
@@ -149,7 +144,6 @@ export const updatePassword = async (
       message: "Password updated successfully",
     });
   } catch (error) {
-    logger.error(`Update password error: ${(error as Error).message}`);
     next(error);
   }
 };
@@ -177,7 +171,6 @@ export const destroySession = async (
       .status(200)
       .json({ success: true, message: "Logged out successfully" });
   } catch (error) {
-    logger.error(`Destroy session error: ${(error as Error).message}`);
     next(error);
   }
 };
