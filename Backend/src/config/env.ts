@@ -14,6 +14,7 @@ const envSchema = z.object({
 
   ACCESS_SECRET: z.string().min(1),
   REFRESH_SECRET: z.string().min(1),
+  CRON_SECRET: z.string().min(1),
 
   IOREDIS_URL: z.string().url("IOREDIS_URL must be a valid URL"),
 

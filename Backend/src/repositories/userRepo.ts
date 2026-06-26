@@ -25,3 +25,8 @@ export const updateUser = (
 ): Promise<UserDocument | null> => {
   return User.findByIdAndUpdate(userId, update, { new: true });
 };
+
+export const getAllUserIds = async (): Promise<string[]> => {
+  const users = await User.find({}).select("_id").lean();
+  return users.map((user) => user._id.toString());
+};

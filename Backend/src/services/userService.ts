@@ -1,8 +1,8 @@
 import { env } from "../config/env.js";
 import * as userRepo from "../repositories/userRepo.js";
 import * as otpService from "./otpService.js";
-import * as queueService from "./queueService.js";
-import { CreateUserData, UserDocument } from "../repositories/userRepo.js";
+import * as emailService from "./emailService.js";
+import { UserDocument } from "../repositories/userRepo.js";
 import { ApiError } from "../utils/apiError.js";
 import crypto from "crypto";
 import {
@@ -179,7 +179,7 @@ export const forgetPassword = async (email: string) => {
 
   const resetLink = `${env.FRONTEND_URL}/reset-password?token=${resetToken}&userId=${user._id}`;
 
-  await queueService.sendPasswordResetEmail(user.email, resetLink);
+  emailService.sendPasswordResetEmail(user.email, resetLink);
 };
 
 export const resetPassword = async (

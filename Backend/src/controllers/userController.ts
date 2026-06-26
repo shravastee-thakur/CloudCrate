@@ -1,6 +1,6 @@
 import { Request, Response, NextFunction } from "express";
 import * as userService from "../services/userService.js";
-import * as queueService from "../services/queueService.js";
+import * as emailService from "../services/emailService.js";
 import logger from "../utils/logger.js";
 import { ApiError } from "../utils/apiError.js";
 import {
@@ -46,7 +46,7 @@ export const createOtpRequest = async (
 
     const otp = await userService.processLoginOtp(user.email);
 
-    await queueService.sendLoginOtpEmail(user.email, otp);
+    emailService.sendLoginOtpEmail(user.email, otp);
 
     logger.info(`OTP sent to ${user.email}`);
 

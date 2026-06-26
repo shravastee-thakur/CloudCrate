@@ -103,6 +103,13 @@ export const initializeUpload = async (
 
   const redisKey = `user:storage:used:${userId}`;
 
+   // Lazy Hydration: If Redis was flushed, rebuild the key from the MongoDB ledger
+  const keyExists = await redis.exists(redisKey);
+  if (!keyExists) {
+    const trueStorage = await storageTransactionRepo.calculateTotalStorage(userId);
+    await redis.set(redisKey, trueStorage.toString());
+  }
+
   const quotaResult = await redis.eval(
     CHECK_QUOTA_LUA,
     1,
