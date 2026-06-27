@@ -8,7 +8,7 @@ export interface IShareLink {
   maxDownloads: number;
   currentDownloads: number;
   isActive: boolean;
-  passwordHash: string; // bcrypt hash if they password-protect the link
+  passwordHash?: string; // bcrypt hash if they password-protect the link
   createdAt?: Date;
   updatedAt?: Date;
 }
@@ -19,13 +19,13 @@ const shareLinkSchema = new Schema<IShareLink>(
       type: Schema.Types.ObjectId,
       ref: "Media",
       required: true,
-      index: true
+      index: true,
     },
     sharedBy: {
       type: Schema.Types.ObjectId,
       ref: "User",
       required: true,
-      index: true
+      index: true,
     },
     token: {
       type: String,
@@ -51,11 +51,10 @@ const shareLinkSchema = new Schema<IShareLink>(
     },
     passwordHash: {
       type: String,
-      select: false
+      select: false,
     },
   },
   { timestamps: true },
-  
 );
 
 // Auto-expire index: MongoDB will automatically delete documents where expiresAt is in the past

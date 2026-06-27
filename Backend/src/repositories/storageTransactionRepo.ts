@@ -6,7 +6,7 @@ import mongoose from "mongoose";
 
 export type StorageTransactionDocument = HydratedDocument<IStorageTransaction>;
 
-export interface CreateStorageTransactionInput {
+export interface CreateStorageTransactionData {
   userId: string;
   mediaId?: string;
   type: "upload" | "deletion" | "adjustment";
@@ -15,7 +15,7 @@ export interface CreateStorageTransactionInput {
 }
 
 export const recordTransaction = async (
-  data: CreateStorageTransactionInput,
+  data: CreateStorageTransactionData,
 ): Promise<StorageTransactionDocument> => {
   try {
     return await StorageTransaction.create({
