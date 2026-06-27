@@ -6,6 +6,7 @@ import { sanitizeMiddleware } from "./middlewares/sanitize.js";
 import { errorHandler } from "./middlewares/errorMiddleware.js";
 import userRoutes from "./routes/userRoutes.js";
 import mediaRoutes from "./routes/mediaRoutes.js";
+import systemRoutes from "./routes/systemRoutes.js";
 
 const app = express();
 
@@ -31,6 +32,9 @@ app.use("/api/v1/users", userRoutes);
 
 app.use("/api/v1/media", mediaRoutes);
 // http://localhost:3000/api/v1/media/initialize
+
+app.use("/api/v1/system", systemRoutes);
+// http://localhost:3000/api/v1/system/cron/purge-cloud
 
 app.use(errorHandler);
 

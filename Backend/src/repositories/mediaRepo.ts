@@ -178,10 +178,13 @@ export const softDeleteMedia = async (
   ).exec();
 };
 
-// Consumed by BullMQ Jobs
+// Consumed by Cron Jobs
 export const fetchOrphanedStorageKeys = async (
   limit: number = 50,
 ): Promise<CloudPurgePayload[]> => {
+  // Dynamically get the exact collection name Mongoose is using
+  const collectionName = Media.collection.name;
+
   const pipeline = [
     // Find soft-deleted files not yet purged from B2
     { $match: { deletedAt: { $ne: null }, b2DeletedAt: null } },
@@ -189,7 +192,7 @@ export const fetchOrphanedStorageKeys = async (
     // Self-join to check if any active record still uses this storageKey
     {
       $lookup: {
-        from: "media",
+        from: collectionName,
         let: { key: "$storageKey" },
         pipeline: [
           {
