@@ -7,6 +7,7 @@ import { errorHandler } from "./middlewares/errorMiddleware.js";
 import userRoutes from "./routes/userRoutes.js";
 import mediaRoutes from "./routes/mediaRoutes.js";
 import systemRoutes from "./routes/systemRoutes.js";
+import shareLinkRoutes from "./routes/shareLinkRoutes.js";
 
 const app = express();
 
@@ -35,6 +36,9 @@ app.use("/api/v1/media", mediaRoutes);
 
 app.use("/api/v1/system", systemRoutes);
 // http://localhost:3000/api/v1/system/cron/purge-cloud
+
+app.use("/api/v1/share", shareLinkRoutes);
+// http://localhost:3000/api/v1/share/
 
 app.use(errorHandler);
 

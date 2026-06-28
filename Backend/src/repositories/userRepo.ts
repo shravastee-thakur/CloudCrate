@@ -23,7 +23,7 @@ export const updateUser = (
   userId: string,
   update: Partial<IUser>,
 ): Promise<UserDocument | null> => {
-  return User.findByIdAndUpdate(userId, update, { new: true });
+  return User.findByIdAndUpdate(userId, update, { returnDocument: "after" });
 };
 
 export const getAllUserIds = async (): Promise<string[]> => {

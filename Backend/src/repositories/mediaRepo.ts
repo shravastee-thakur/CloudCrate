@@ -91,7 +91,7 @@ export const attachMultipartId = async (
       multipartUploadId,
       status: "uploading",
     },
-    { new: true },
+    { returnDocument: "after" },
   ).exec();
 };
 
@@ -224,7 +224,7 @@ export const confirmCloudPurge = async (
   return Media.findOneAndUpdate(
     { _id: mediaId, deletedAt: { $ne: null }, b2DeletedAt: null },
     { b2DeletedAt: new Date() },
-    { new: true },
+    { returnDocument: "after" },
   ).exec();
 };
 

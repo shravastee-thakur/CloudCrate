@@ -60,7 +60,8 @@ export const getUserShareLinks = async (
 export const incrementDownloadCount = async (
   shareLinkId: string,
 ): Promise<ShareLinkDocument | null> => {
-  return ShareLink.findOneAndUpdate(
+  // Step 1: Atomically increment ONLY if the current count is strictly less than the max
+  const updatedLink = await ShareLink.findOneAndUpdate(
     {
       _id: new mongoose.Types.ObjectId(shareLinkId),
       isActive: true,
@@ -69,29 +70,26 @@ export const incrementDownloadCount = async (
         { $expr: { $lt: ["$currentDownloads", "$maxDownloads"] } },
       ],
     },
-    [
-      {
-        $set: {
-          currentDownloads: { $add: ["$currentDownloads", 1] },
-          isActive: {
-            $cond: {
-              if: {
-                $and: [
-                  { $gt: ["$maxDownloads", 0] },
-                  {
-                    $gte: [{ $add: ["$currentDownloads", 1] }, "$maxDownloads"],
-                  },
-                ],
-              },
-              then: false,
-              else: "$isActive",
-            },
-          },
-        },
-      },
-    ],
+    { $inc: { currentDownloads: 1 } },
     { new: true },
   ).exec();
+
+  // If the query didn't match, the link is inactive or the limit is reached
+  if (!updatedLink) {
+    return null;
+  }
+
+  // Step 2: If it just hit the limit, deactivate it for the UI and future fast rejections
+  if (
+    updatedLink.maxDownloads > 0 &&
+    updatedLink.currentDownloads >= updatedLink.maxDownloads &&
+    updatedLink.isActive === true
+  ) {
+    updatedLink.isActive = false;
+    await updatedLink.save();
+  }
+
+  return updatedLink;
 };
 
 export const deactivateLink = async (
@@ -104,6 +102,6 @@ export const deactivateLink = async (
       sharedBy: new mongoose.Types.ObjectId(userId),
     },
     { isActive: false },
-    { new: true },
+    { returnDocument: "after" },
   ).exec();
 };

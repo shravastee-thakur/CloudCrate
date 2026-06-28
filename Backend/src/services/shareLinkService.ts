@@ -9,6 +9,7 @@ import { ApiError } from "../utils/apiError.js";
 import bcrypt from "bcrypt";
 import crypto from "crypto";
 
+// Data Transfer Object is the exact object your controller sends back to the frontend in the JSON response.
 export interface ShareLinkDto {
   _id: string;
   mediaId: string;
@@ -18,7 +19,6 @@ export interface ShareLinkDto {
   maxDownloads: number;
   currentDownloads: number;
   isActive: boolean;
-  passwordHash?: string;
   createdAt?: Date;
   updatedAt?: Date;
 }
@@ -42,7 +42,6 @@ const mapToShareLinkDto = (link: ShareLinkDocument): ShareLinkDto => {
     maxDownloads: obj.maxDownloads,
     currentDownloads: obj.currentDownloads,
     isActive: obj.isActive,
-    passwordHash: obj.passwordHash,
     createdAt: obj.createdAt,
     updatedAt: obj.updatedAt,
   };
@@ -108,7 +107,16 @@ export const getPublicDownloadUrl = async (
     }
   }
 
-  // 3. Atomically increment the download count and enforce limits
+  // 3. Fetch the underlying media file to ensure it has not been deleted since the link was created
+  const mediaFile = await mediaRepo.findById(link.mediaId.toString());
+  if (!mediaFile || mediaFile.deletedAt) {
+    throw new ApiError(
+      404,
+      "The underlying file has been removed by the owner",
+    );
+  }
+
+  // 4. Atomically increment the download count and enforce limits
   const updatedLink = await shareLinkRepo.incrementDownloadCount(
     link._id.toString(),
   );
@@ -116,12 +124,14 @@ export const getPublicDownloadUrl = async (
     throw new ApiError(429, "Download limit reached for this share link");
   }
 
-  // 4. Fetch the underlying media file to ensure it has not been deleted since the link was created
-  const mediaFile = await mediaRepo.findById(link.mediaId.toString());
-  if (!mediaFile || mediaFile.deletedAt) {
-    throw new ApiError(
-      404,
-      "The underlying file has been removed by the owner",
+  // If the link just hit its maximum downloads, deactivate it for the dashboard UI
+  if (
+    updatedLink.maxDownloads > 0 &&
+    updatedLink.currentDownloads >= updatedLink.maxDownloads
+  ) {
+    await shareLinkRepo.deactivateLink(
+      updatedLink._id.toString(),
+      updatedLink.sharedBy.toString(),
     );
   }
 
